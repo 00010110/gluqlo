@@ -204,7 +204,8 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	color.r = color.g = color.b = c;
 
 	// create surface to scale from filled background surface
-	SDL_Surface *bgcopy = SDL_ConvertSurface(bg, bg->format, bg->flags);
+	// bgcopy is using for blit text, so need use same format with screen, for avoid any alpha rendering problem
+	SDL_Surface *bgcopy = SDL_ConvertSurface(bg, surface->format, surface->flags);
 	rect.x = 0;
 	rect.y = 0;
 	rect.w = bgcopy->w;
