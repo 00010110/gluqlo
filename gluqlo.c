@@ -476,18 +476,15 @@ void render_seasonal_display(int layout_index, const struct tm *time_i) {
 	render_centered_utf8(screen, font_season_blur, seasonal.next_jieqi,
 		side_jieqi_color, right_x, jieqi_y);
 	render_centered_utf8(screen,
-		seasonal.current_hou_index == 0 ? font_hou_current : font_hou_blur,
-		seasonal.first_hou,
+		font_hou_blur, seasonal.first_hou,
 		seasonal.current_hou_index == 0 ? current_color : blur_color,
 		left_x, hou_y);
 	render_centered_utf8(screen,
-		seasonal.current_hou_index == 1 ? font_hou_current : font_hou_blur,
-		seasonal.second_hou,
+		font_hou_blur, seasonal.second_hou,
 		seasonal.current_hou_index == 1 ? current_color : blur_color,
 		center_x, hou_y);
 	render_centered_utf8(screen,
-		seasonal.current_hou_index == 2 ? font_hou_current : font_hou_blur,
-		seasonal.third_hou,
+		font_hou_blur, seasonal.third_hou,
 		seasonal.current_hou_index == 2 ? current_color : blur_color,
 		right_x, hou_y);
 }
