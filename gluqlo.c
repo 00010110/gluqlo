@@ -446,6 +446,7 @@ void render_seasonal_display(int layout_index, const struct tm *time_i) {
 	SDL_Rect area_rect;
 	SDL_Color current_color = {0xd0, 0xd0, 0xd0};
 	SDL_Color blur_color = {0x55, 0x55, 0x55};
+	SDL_Color side_jieqi_color = {0x18, 0x18, 0x18};
 
 	if (!font_season_current || !font_season_blur ||
 	    !font_hou_current || !font_hou_blur ||
@@ -469,11 +470,11 @@ void render_seasonal_display(int layout_index, const struct tm *time_i) {
 	int hou_y = area->y + area->h * 0.66;
 
 	render_centered_utf8(screen, font_season_blur, seasonal.prev_jieqi,
-		blur_color, left_x, jieqi_y);
+		side_jieqi_color, left_x, jieqi_y);
 	render_centered_utf8(screen, font_season_current, seasonal.current_jieqi,
 		current_color, center_x, jieqi_y);
 	render_centered_utf8(screen, font_season_blur, seasonal.next_jieqi,
-		blur_color, right_x, jieqi_y);
+		side_jieqi_color, right_x, jieqi_y);
 	render_centered_utf8(screen,
 		seasonal.current_hou_index == 0 ? font_hou_current : font_hou_blur,
 		seasonal.first_hou,
