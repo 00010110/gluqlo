@@ -19,8 +19,10 @@
 */
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <X11/Xlib.h>
+#include <X11/extensions/Xinerama.h>
 #include <time.h>
 
 #include "SDL.h"
@@ -28,6 +30,151 @@
 #include "SDL_syswm.h"
 #include "SDL_gfxPrimitives.h"
 #include "SDL_rotozoom.h"
+
+struct monitor_rect { int x, y, w, h; };
+struct clock_layout {
+	SDL_Rect hour;
+	SDL_Rect minute;
+	int rectsize;
+	int spacing;
+	int radius;
+};
+
+#ifndef GLUQLO_NO_MAIN
+static void set_bounds_from_rect(struct monitor_rect *bounds,
+	const struct monitor_rect *rect) {
+	bounds->x = rect->x;
+	bounds->y = rect->y;
+	bounds->w = rect->w;
+	bounds->h = rect->h;
+}
+
+static void expand_bounds(struct monitor_rect *bounds,
+	const struct monitor_rect *rect) {
+	int x1 = bounds->x < rect->x ? bounds->x : rect->x;
+	int y1 = bounds->y < rect->y ? bounds->y : rect->y;
+	int x2 = bounds->x + bounds->w > rect->x + rect->w ?
+		bounds->x + bounds->w : rect->x + rect->w;
+	int y2 = bounds->y + bounds->h > rect->y + rect->h ?
+		bounds->y + bounds->h : rect->y + rect->h;
+	bounds->x = x1;
+	bounds->y = y1;
+	bounds->w = x2 - x1;
+	bounds->h = y2 - y1;
+}
+
+/* Returns physical monitor rectangles from Xinerama, falling back to the root
+ * screen as a single area if Xinerama is unavailable. */
+static int find_monitor_rects(struct monitor_rect *out, int max_out,
+	struct monitor_rect *bounds) {
+	Display *dpy = XOpenDisplay(NULL);
+	if (!dpy) return 0;
+
+	int n = 0;
+	XineramaScreenInfo *si = NULL;
+	int xinerama_active = XineramaIsActive(dpy);
+	if (xinerama_active) si = XineramaQueryScreens(dpy, &n);
+
+	if (!si || n <= 0) {
+		int s = DefaultScreen(dpy);
+		out[0].x = 0;
+		out[0].y = 0;
+		out[0].w = DisplayWidth(dpy, s);
+		out[0].h = DisplayHeight(dpy, s);
+		set_bounds_from_rect(bounds, &out[0]);
+		if (si) XFree(si);
+		XCloseDisplay(dpy);
+		return 1;
+	}
+
+	int count = n < max_out ? n : max_out;
+	for (int i = 0; i < count; i++) {
+		out[i].x = si[i].x_org;
+		out[i].y = si[i].y_org;
+		out[i].w = si[i].width;
+		out[i].h = si[i].height;
+		if (i == 0) set_bounds_from_rect(bounds, &out[i]);
+		else expand_bounds(bounds, &out[i]);
+	}
+
+	XFree(si);
+	XCloseDisplay(dpy);
+	return count;
+}
+#endif
+
+int gluqlo_compute_clock_layout(const struct monitor_rect *area,
+	double display_scale_factor, struct clock_layout *layout) {
+	if (!area || !layout || area->w <= 0 || area->h <= 0 ||
+	    display_scale_factor <= 0) {
+		return 0;
+	}
+
+	int width = area->w * display_scale_factor;
+	int height = area->h * display_scale_factor;
+	bool is_horizontal = width > height;
+
+	if (is_horizontal) {
+		layout->rectsize = height * 0.6;
+		layout->spacing = width * .031;
+		layout->radius = height * .05714;
+	} else {
+		layout->rectsize = width * 0.6;
+		layout->spacing = height * .031;
+		layout->radius = width * .05714;
+	}
+
+	int jitter_width  = 1;
+	int jitter_height = 1;
+	if (display_scale_factor != 1) {
+		jitter_width  = (area->w - width) * 0.5;
+		jitter_height = (area->h - height) * 0.5;
+	}
+
+	layout->hour.w = layout->rectsize;
+	layout->hour.h = layout->rectsize;
+	layout->minute.w = layout->rectsize;
+	layout->minute.h = layout->rectsize;
+
+	if (is_horizontal) {
+		layout->hour.x = area->x +
+			0.5 * (width - (0.031 * width) - (1.2 * height)) +
+			jitter_width;
+		layout->hour.y = area->y + 0.2 * height + jitter_height;
+		layout->minute.x = layout->hour.x + (0.6 * height) +
+			layout->spacing;
+		layout->minute.y = layout->hour.y;
+	} else {
+		layout->hour.y = area->y +
+			0.5 * (height - (0.031 * height) - (1.2 * width)) +
+			jitter_height;
+		layout->hour.x = area->x + 0.2 * width + jitter_width;
+		layout->minute.y = layout->hour.y + (0.6 * width) +
+			layout->spacing;
+		layout->minute.x = layout->hour.x;
+	}
+
+	return 1;
+}
+
+int gluqlo_format_window_position(char *buf, size_t buflen, int x, int y) {
+	if (!buf || buflen == 0) return 0;
+	int written = snprintf(buf, buflen, "%d,%d", x, y);
+	return written > 0 && (size_t) written < buflen;
+}
+
+void gluqlo_choose_render_area(int has_window, int window_w, int window_h,
+	int surface_w, int surface_h, struct monitor_rect *area) {
+	area->x = 0;
+	area->y = 0;
+	if (has_window && window_w > 0 && window_h > 0) {
+		area->w = window_w;
+		area->h = window_h;
+	} else {
+		area->w = surface_w;
+		area->h = surface_h;
+	}
+}
 
 #ifndef FONT
 #define FONT "/usr/share/gluqlo/gluqlo.ttf"
@@ -60,7 +207,11 @@ SDL_Rect hourBackground;
 SDL_Rect minBackground;
 
 SDL_Rect bgrect;
-SDL_Surface *bg;
+
+#define MAX_CLOCK_LAYOUTS 16
+struct clock_layout clock_layouts[MAX_CLOCK_LAYOUTS];
+SDL_Surface *clock_backgrounds[MAX_CLOCK_LAYOUTS];
+int clock_layout_count = 0;
 
 // draw rounded box
 // see http://lists.libsdl.org/pipermail/sdl-libsdl.org/2006-December/058868.html
@@ -172,7 +323,9 @@ void blit_digits(SDL_Surface *surface, SDL_Rect *rect, int spc, char digits[], S
 }
 
 
-void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], char prevdigits[], int maxsteps, int step) {
+void render_digits(SDL_Surface *surface, SDL_Surface *bg_surface,
+	SDL_Rect *background, char digits[], char prevdigits[], int maxsteps,
+	int step) {
 	SDL_Rect rect, dstrect;
 	SDL_Color color;
 	double scale;
@@ -188,7 +341,7 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 	rect.w = background->w;
 	rect.h = background->h/2;
 	SDL_SetClipRect(surface, &rect);
-	SDL_BlitSurface(bg, 0, surface, &rect);
+	SDL_BlitSurface(bg_surface, 0, surface, &rect);
 	blit_digits(surface, background, spc, digits, FONT_COLOR);
 	SDL_SetClipRect(surface, NULL);
 
@@ -205,7 +358,7 @@ void render_digits(SDL_Surface *surface, SDL_Rect *background, char digits[], ch
 
 	// create surface to scale from filled background surface
 	// bgcopy is using for blit text, so need use same format with screen, for avoid any alpha rendering problem
-	SDL_Surface *bgcopy = SDL_ConvertSurface(bg, surface->format, surface->flags);
+	SDL_Surface *bgcopy = SDL_ConvertSurface(bg_surface, surface->format, surface->flags);
 	rect.x = 0;
 	rect.y = 0;
 	rect.w = bgcopy->w;
@@ -244,30 +397,37 @@ void render_clock(int maxsteps, int step) {
 	char buffer[3], buffer2[3];
 	struct tm *_time;
 	time_t rawtime;
+	int old_h = past_h;
+	int old_m = past_m;
 
 	time(&rawtime);
 	_time = localtime(&rawtime);
 
-	// draw hours
-	if(_time->tm_hour != past_h) {
-		int h = twentyfourh ? _time->tm_hour : (_time->tm_hour + 11) % 12 + 1;
-		if(leadingzero) {
-			snprintf(buffer, 3, "%02d", h);
-			snprintf(buffer2, 3, "%02d", past_h);
-		} else {
-			snprintf(buffer, 3, "%d", h);
-			snprintf(buffer2, 3, "%d", past_h);
+	for (int i = 0; i < clock_layout_count; i++) {
+		// draw hours
+		if(_time->tm_hour != old_h) {
+			int h = twentyfourh ? _time->tm_hour : (_time->tm_hour + 11) % 12 + 1;
+			if(leadingzero) {
+				snprintf(buffer, 3, "%02d", h);
+				snprintf(buffer2, 3, "%02d", old_h);
+			} else {
+				snprintf(buffer, 3, "%d", h);
+				snprintf(buffer2, 3, "%d", old_h);
+			}
+			render_digits(screen, clock_backgrounds[i],
+				&clock_layouts[i].hour, buffer, buffer2, maxsteps, step);
+			// draw am/pm
+			if(!twentyfourh) render_ampm(screen, &clock_layouts[i].hour,
+				_time->tm_hour >= 12);
 		}
-		render_digits(screen, &hourBackground, buffer, buffer2, maxsteps, step);
-		// draw am/pm
-		if(!twentyfourh) render_ampm(screen, &hourBackground, _time->tm_hour >= 12);
-	}
 
-	// draw minutes
-	if(_time->tm_min != past_m) {
-		snprintf(buffer, 3, "%02d", _time->tm_min);
-		snprintf(buffer2, 3, "%02d", past_m);
-		render_digits(screen, &minBackground, buffer, buffer2, maxsteps, step);
+		// draw minutes
+		if(_time->tm_min != old_m) {
+			snprintf(buffer, 3, "%02d", _time->tm_min);
+			snprintf(buffer2, 3, "%02d", old_m);
+			render_digits(screen, clock_backgrounds[i],
+				&clock_layouts[i].minute, buffer, buffer2, maxsteps, step);
+		}
 	}
 
 	// flip backbuffer
@@ -325,6 +485,7 @@ Uint32 update_time(Uint32 interval, void *param) {
 	return interval;
 }
 
+#ifndef GLUQLO_NO_MAIN
 int main(int argc, char** argv ) {
 	char *wid_env;
 	static char sdlwid[100];
@@ -333,6 +494,12 @@ int main(int argc, char** argv ) {
 	Uint32 wid = 0;
 	Display *display;
 	XWindowAttributes windowAttributes;
+	int embedded_x = 0, embedded_y = 0;
+	int have_embedded_position = 0;
+	struct monitor_rect monitors[MAX_CLOCK_LAYOUTS];
+	struct monitor_rect desktop_bounds = {0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT};
+	int monitor_count = find_monitor_rects(monitors, MAX_CLOCK_LAYOUTS,
+		&desktop_bounds);
 
 	for(int i = 1; i < argc; i++) {
 		if(strcmp("--help",argv[i]) == 0 || strcmp("-help", argv[i]) == 0) {
@@ -348,7 +515,7 @@ int main(int argc, char** argv ) {
 			printf("  -r\t\tCustom resolution in WxH format\n");
 			printf("  -s\t\tCustom display scale factor\n");
 			return 0;
-		} else if(strcmp("-root", argv[i]) == 0 || strcmp("-f", argv[i]) == 0 || strcmp("--fullscreen", argv[i]) == 0) {
+		} else if(strcmp("-root", argv[i]) == 0 || strcmp("--root", argv[i]) == 0 || strcmp("-f", argv[i]) == 0 || strcmp("--fullscreen", argv[i]) == 0) {
 			fullscreen = true;
 		} else if(strcmp("-noflip", argv[i]) == 0) {
 			animate = false;
@@ -395,13 +562,29 @@ int main(int argc, char** argv ) {
 	if(wid != 0) {
 		if ((display = XOpenDisplay(NULL)) != NULL) { /* Use the default display */
 			XGetWindowAttributes(display, (Window) wid, &windowAttributes);
+			Window child;
+			have_embedded_position = XTranslateCoordinates(display,
+				(Window) wid, DefaultRootWindow(display), 0, 0,
+				&embedded_x, &embedded_y, &child);
 			XCloseDisplay(display);
 			snprintf(sdlwid, 100, "SDL_WINDOWID=0x%X", wid);
 			putenv(sdlwid); /* Tell SDL to use this window */
+			char poshint[64];
+			if (gluqlo_format_window_position(poshint, sizeof(poshint),
+			    embedded_x, embedded_y)) {
+				setenv("SDL_VIDEO_WINDOW_POS", poshint, 1);
+			}
 			width = windowAttributes.width;
 			height = windowAttributes.height;
 		}
 	}
+
+	/* Disable SDL 1.2's XRandR mode-switching path. On Xinerama desktops
+	 * (multi-monitor) SDL will otherwise try to switch modelines, which can
+	 * leave a monitor stuck at 640x480 after we exit. */
+	setenv("SDL_VIDEO_X11_XRANDR", "0", 1);
+	setenv("SDL_VIDEO_X11_VIDMODE", "0", 1);
+	setenv("SDL_VIDEO_CENTERED", "0", 1);
 
 	if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_TIMER) < 0) {
 		fprintf(stderr, "Unable to init SDL: %s\n", SDL_GetError());
@@ -410,7 +593,17 @@ int main(int argc, char** argv ) {
 	atexit(SDL_Quit);
 
 	if(fullscreen && (!wid)) {
-		screen = SDL_SetVideoMode(0, 0, 32, SDL_HWSURFACE|SDL_DOUBLEBUF|SDL_FULLSCREEN);
+		/* Avoid SDL_FULLSCREEN mode switching; cover the virtual desktop
+		 * with one borderless window and render once per physical monitor. */
+		char poshint[64];
+		snprintf(poshint, sizeof poshint, "%d,%d",
+			desktop_bounds.x, desktop_bounds.y);
+		setenv("SDL_VIDEO_WINDOW_POS", poshint, 1);
+		screen = SDL_SetVideoMode(desktop_bounds.w, desktop_bounds.h, 32,
+			SDL_SWSURFACE|SDL_NOFRAME);
+	} else if (wid) {
+		int sw = desktop_bounds.w > width ? desktop_bounds.w : width;
+		screen = SDL_SetVideoMode(sw, height, 32, SDL_SWSURFACE);
 	} else {
 		screen = SDL_SetVideoMode(width, height, 32, SDL_HWSURFACE|SDL_DOUBLEBUF);
 	}
@@ -420,21 +613,44 @@ int main(int argc, char** argv ) {
 		return 1;
 	}
 
+	if (wid && have_embedded_position &&
+	    (display = XOpenDisplay(NULL)) != NULL) {
+		XMoveWindow(display, (Window) wid, embedded_x, embedded_y);
+		XSync(display, False);
+		XCloseDisplay(display);
+	}
+
 	if(fullscreen || wid) {
 		SDL_ShowCursor(SDL_DISABLE);
 	}
 
 	SDL_WM_SetCaption(TITLE, TITLE);
 
-	width = screen->w * display_scale_factor;
-	height = screen->h * display_scale_factor;
+	struct monitor_rect render_areas[MAX_CLOCK_LAYOUTS];
+	if (fullscreen && !wid && monitor_count > 0) {
+		clock_layout_count = monitor_count;
+		for (int i = 0; i < clock_layout_count; i++) {
+			render_areas[i].x = monitors[i].x - desktop_bounds.x;
+			render_areas[i].y = monitors[i].y - desktop_bounds.y;
+			render_areas[i].w = monitors[i].w;
+			render_areas[i].h = monitors[i].h;
+		}
+	} else {
+		/* XScreenSaver provides one window per monitor via
+		 * XSCREENSAVER_WINDOW, so each subprocess renders its full window. */
+		clock_layout_count = 1;
+		gluqlo_choose_render_area(wid != 0, width, height, screen->w,
+			screen->h, &render_areas[0]);
+	}
 
-	bool is_horizontal = width > height;
-	
+	int font_base = render_areas[0].w > render_areas[0].h ?
+		render_areas[0].h * display_scale_factor :
+		render_areas[0].w * display_scale_factor;
+
 	TTF_Init();
 	atexit(TTF_Quit);
-	font_time = TTF_OpenFont(FONT, (is_horizontal ? height : width) / 1.68 );
-	font_mode = TTF_OpenFont(FONT, (is_horizontal ? height : width) / 16.5);
+	font_time = TTF_OpenFont(FONT, font_base / 1.68 );
+	font_mode = TTF_OpenFont(FONT, font_base / 16.5);
 	if (!font_time || !font_mode) {
 		fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
 		return 1;
@@ -443,58 +659,28 @@ int main(int argc, char** argv ) {
 	// clear screen
 	SDL_FillRect(screen, 0, SDL_MapRGB(screen->format, 0, 0, 0));
 
-	// calculate box coordinates
-	int rectsize;
-	int spacing;
-	int radius;
-
-	if (is_horizontal) {
-		rectsize = height * 0.6;
-		spacing = width * .031;
-		radius =  height * .05714;
+	for (int i = 0; i < clock_layout_count; i++) {
+		if (!gluqlo_compute_clock_layout(&render_areas[i],
+		    display_scale_factor, &clock_layouts[i])) {
+			fprintf(stderr, "Unable to calculate clock layout\n");
+			return 1;
+		}
+		bgrect.x = 0;
+		bgrect.y = 0;
+		bgrect.w = clock_layouts[i].rectsize;
+		bgrect.h = clock_layouts[i].rectsize;
+		clock_backgrounds[i] = SDL_CreateRGBSurface(
+			SDL_HWSURFACE|SDL_SRCALPHA,
+			clock_layouts[i].rectsize,
+			clock_layouts[i].rectsize, 32, 0xff000000,
+			0x00ff0000, 0x0000ff00, 0x000000ff);
+		if (!clock_backgrounds[i]) {
+			fprintf(stderr, "SDL_CreateRGBSurface: %s\n", SDL_GetError());
+			return 1;
+		}
+		fill_rounded_box_b(clock_backgrounds[i], &bgrect,
+			clock_layouts[i].radius, BACKGROUND_COLOR);
 	}
-	else {
-		rectsize = width * 0.6;
-		spacing = height * .031;
-		radius =  width * .05714;
-	}
-
-	int jitter_width  = 1;
-	int jitter_height = 1;
-	if (display_scale_factor != 1) {
-		jitter_width  = (screen->w - width) * 0.5;
-		jitter_height = (screen->h - height) * 0.5;
-	}
-
-	hourBackground.w = rectsize;
-	hourBackground.h = rectsize;
-	minBackground.w = rectsize;
-	minBackground.h = rectsize;
-
-	if (is_horizontal) {
-		hourBackground.x = 0.5 * (width - (0.031 * width) - (1.2 * height))
-										+ jitter_width;
-		hourBackground.y = 0.2 * height + jitter_height;
-
-		minBackground.x = hourBackground.x + (0.6 * height) + spacing;
-		minBackground.y = hourBackground.y;
-	}
-	else {
-		hourBackground.y = 0.5 * (height - (0.031 * height) - (1.2 * width))
-										+ jitter_height;
-		hourBackground.x = 0.2 * width + jitter_width;
-
-		minBackground.y = hourBackground.y + (0.6 * width) + spacing;
-		minBackground.x = hourBackground.x;
-	}
-
-	// create background surface
-	bgrect.x = 0;
-	bgrect.y = 0;
-	bgrect.w = rectsize;
-	bgrect.h = rectsize;
-	bg = SDL_CreateRGBSurface(SDL_HWSURFACE|SDL_SRCALPHA, rectsize, rectsize, 32, 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff);
-	fill_rounded_box_b(bg, &bgrect, radius, BACKGROUND_COLOR);
 
 	// draw current time
 	render_clock(20, 19);
@@ -547,7 +733,10 @@ int main(int argc, char** argv ) {
 
 	SDL_RemoveTimer(timer);
 
-	SDL_FreeSurface(bg);
+	for (int i = 0; i < clock_layout_count; i++) {
+		SDL_FreeSurface(clock_backgrounds[i]);
+	}
+
 	SDL_FreeSurface(screen);
 
 	TTF_CloseFont(font_time);
@@ -555,3 +744,4 @@ int main(int argc, char** argv ) {
 
 	return 0;
 }
+#endif

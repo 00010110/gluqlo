@@ -11,6 +11,7 @@ Currently it's very close to original Fliqlo (as I hope).
 - SDL 1.2
 - SDL_gfx 1.2
 - SDL_ttf 2.0
+- Xinerama
 - XScreensaver (optional)
 
 ## Installing from PPA (Ubuntu from Vivid up to Xenial)
@@ -23,7 +24,7 @@ Currently it's very close to original Fliqlo (as I hope).
 
 First, install build-time dependencies (Ubuntu/Debian):
 
-    $ sudo apt-get install build-essential libsdl1.2-dev libsdl-ttf2.0-dev libsdl-gfx1.2-dev libx11-dev
+    $ sudo apt-get install build-essential libsdl1.2-dev libsdl-ttf2.0-dev libsdl-gfx1.2-dev libx11-dev libxinerama-dev
 
 Then compile and install as usual:
 

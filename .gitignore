@@ -1,2 +1,3 @@
 *.o
 gluqlo
+tests/geometry_test
