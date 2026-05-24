@@ -1,12 +1,15 @@
 CC=g++
 FONTDIR=$(DESTDIR)/usr/share/gluqlo
 XSCREENSAVERDIRS=/usr/libexec/xscreensaver /usr/lib/xscreensaver
-CFLAGS=-Wall -o gluqlo gluqlo.c `sdl-config --libs --cflags` -DFONT='"$(FONTDIR)/gluqlo.ttf"'
+SXTWL_SOURCES=third_party/sxtwl_cpp/src/JD.cpp third_party/sxtwl_cpp/src/SSQ.cpp third_party/sxtwl_cpp/src/XL.cpp third_party/sxtwl_cpp/src/day.cpp third_party/sxtwl_cpp/src/eph.cpp third_party/sxtwl_cpp/src/sxtwl.cpp
+SEASONAL_SOURCES=gluqlo_seasonal.cpp $(SXTWL_SOURCES)
+WARNING_FLAGS=-Wall -Wno-sign-compare -Wno-unused-variable -Wno-parentheses
+CFLAGS=$(WARNING_FLAGS) -I. -Ithird_party/sxtwl_cpp/src -o gluqlo gluqlo.c $(SEASONAL_SOURCES) `sdl-config --libs --cflags` -DFONT='"$(FONTDIR)/gluqlo.ttf"'
 LDFLAGS=-lX11 -lXinerama -lSDL_ttf -lSDL_gfx
 
 all: gluqlo
 
-gluqlo: gluqlo.c
+gluqlo: gluqlo.c gluqlo_seasonal.cpp gluqlo_seasonal.h $(SXTWL_SOURCES)
 	$(CC) $(CFLAGS) $(LDFLAGS)
 
 test: tests/geometry_test
@@ -16,8 +19,8 @@ test: tests/geometry_test
 integration-test: all
 	tests/xscreensaver_position_test.sh
 
-tests/geometry_test: tests/geometry_test.c gluqlo.c
-	$(CC) -Wall -DGLUQLO_NO_MAIN -o tests/geometry_test tests/geometry_test.c gluqlo.c `sdl-config --libs --cflags` $(LDFLAGS)
+tests/geometry_test: tests/geometry_test.c gluqlo.c gluqlo_seasonal.cpp gluqlo_seasonal.h
+	$(CC) $(WARNING_FLAGS) -I. -Ithird_party/sxtwl_cpp/src -DGLUQLO_NO_MAIN -o tests/geometry_test tests/geometry_test.c gluqlo.c $(SEASONAL_SOURCES) `sdl-config --libs --cflags` $(LDFLAGS)
 
 print-install-targets:
 	@for dir in $(XSCREENSAVERDIRS); do echo "$$dir/gluqlo"; done

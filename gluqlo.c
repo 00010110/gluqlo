@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/Xinerama.h>
 #include <time.h>
@@ -30,6 +31,7 @@
 #include "SDL_syswm.h"
 #include "SDL_gfxPrimitives.h"
 #include "SDL_rotozoom.h"
+#include "gluqlo_seasonal.h"
 
 struct monitor_rect { int x, y, w, h; };
 struct clock_layout {
@@ -176,6 +178,32 @@ void gluqlo_choose_render_area(int has_window, int window_w, int window_h,
 	}
 }
 
+int gluqlo_should_render_seasonal_on_monitor(const struct monitor_rect *monitors,
+	int count, int index) {
+	if (!monitors || count < 2 || index < 0 || index >= count) return 0;
+
+	int leftmost = 0;
+	for (int i = 1; i < count; i++) {
+		if (monitors[i].x < monitors[leftmost].x ||
+		    (monitors[i].x == monitors[leftmost].x &&
+		     monitors[i].y < monitors[leftmost].y)) {
+			leftmost = i;
+		}
+	}
+
+	return index == leftmost;
+}
+
+const char *gluqlo_choose_existing_font(const char **paths, int count) {
+	if (!paths || count <= 0) return NULL;
+
+	for (int i = 0; i < count; i++) {
+		if (paths[i] && access(paths[i], R_OK) == 0) return paths[i];
+	}
+
+	return NULL;
+}
+
 #ifndef FONT
 #define FONT "/usr/share/gluqlo/gluqlo.ttf"
 #endif
@@ -197,6 +225,10 @@ int height = DEFAULT_HEIGHT;
 
 TTF_Font *font_time = NULL;
 TTF_Font *font_mode = NULL;
+TTF_Font *font_season_current = NULL;
+TTF_Font *font_season_blur = NULL;
+TTF_Font *font_hou_current = NULL;
+TTF_Font *font_hou_blur = NULL;
 
 const SDL_Color FONT_COLOR = { 0xb7, 0xb7, 0xb7 };
 const SDL_Color BACKGROUND_COLOR = { 0x0f, 0x0f, 0x0f };
@@ -209,8 +241,12 @@ SDL_Rect minBackground;
 SDL_Rect bgrect;
 
 #define MAX_CLOCK_LAYOUTS 16
+#define GLUQLO_CONTENT_TIME 0
+#define GLUQLO_CONTENT_SEASONAL 1
+struct monitor_rect clock_areas[MAX_CLOCK_LAYOUTS];
 struct clock_layout clock_layouts[MAX_CLOCK_LAYOUTS];
 SDL_Surface *clock_backgrounds[MAX_CLOCK_LAYOUTS];
+int clock_content[MAX_CLOCK_LAYOUTS];
 int clock_layout_count = 0;
 
 // draw rounded box
@@ -393,6 +429,68 @@ void render_digits(SDL_Surface *surface, SDL_Surface *bg_surface,
 	SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0x1a, 0x1a, 0x1a));
 }
 
+static void render_centered_utf8(SDL_Surface *surface, TTF_Font *font,
+	const char *text, SDL_Color color, int center_x, int center_y) {
+	SDL_Surface *text_surface = TTF_RenderUTF8_Blended(font, text, color);
+	if (!text_surface) return;
+
+	SDL_Rect coords;
+	coords.x = center_x - text_surface->w / 2;
+	coords.y = center_y - text_surface->h / 2;
+	SDL_BlitSurface(text_surface, 0, surface, &coords);
+	SDL_FreeSurface(text_surface);
+}
+
+void render_seasonal_display(int layout_index, const struct tm *time_i) {
+	struct seasonal_display seasonal;
+	SDL_Rect area_rect;
+	SDL_Color current_color = {0xd0, 0xd0, 0xd0};
+	SDL_Color blur_color = {0x55, 0x55, 0x55};
+
+	if (!font_season_current || !font_season_blur ||
+	    !font_hou_current || !font_hou_blur ||
+	    !gluqlo_compute_seasonal_display(time_i->tm_year + 1900,
+	    time_i->tm_mon + 1, time_i->tm_mday, time_i->tm_hour,
+	    time_i->tm_min, time_i->tm_sec, &seasonal)) {
+		return;
+	}
+
+	const struct monitor_rect *area = &clock_areas[layout_index];
+	area_rect.x = area->x;
+	area_rect.y = area->y;
+	area_rect.w = area->w;
+	area_rect.h = area->h;
+	SDL_FillRect(screen, &area_rect, SDL_MapRGB(screen->format, 0, 0, 0));
+
+	int left_x = area->x + area->w * 0.20;
+	int center_x = area->x + area->w * 0.50;
+	int right_x = area->x + area->w * 0.80;
+	int jieqi_y = area->y + area->h * 0.34;
+	int hou_y = area->y + area->h * 0.66;
+
+	render_centered_utf8(screen, font_season_blur, seasonal.prev_jieqi,
+		blur_color, left_x, jieqi_y);
+	render_centered_utf8(screen, font_season_current, seasonal.current_jieqi,
+		current_color, center_x, jieqi_y);
+	render_centered_utf8(screen, font_season_blur, seasonal.next_jieqi,
+		blur_color, right_x, jieqi_y);
+	render_centered_utf8(screen,
+		seasonal.current_hou_index == 0 ? font_hou_current : font_hou_blur,
+		seasonal.first_hou,
+		seasonal.current_hou_index == 0 ? current_color : blur_color,
+		left_x, hou_y);
+	render_centered_utf8(screen,
+		seasonal.current_hou_index == 1 ? font_hou_current : font_hou_blur,
+		seasonal.second_hou,
+		seasonal.current_hou_index == 1 ? current_color : blur_color,
+		center_x, hou_y);
+	render_centered_utf8(screen,
+		seasonal.current_hou_index == 2 ? font_hou_current : font_hou_blur,
+		seasonal.third_hou,
+		seasonal.current_hou_index == 2 ? current_color : blur_color,
+		right_x, hou_y);
+}
+
 void render_clock(int maxsteps, int step) {
 	char buffer[3], buffer2[3];
 	struct tm *_time;
@@ -404,6 +502,11 @@ void render_clock(int maxsteps, int step) {
 	_time = localtime(&rawtime);
 
 	for (int i = 0; i < clock_layout_count; i++) {
+		if (clock_content[i] == GLUQLO_CONTENT_SEASONAL) {
+			if (step == maxsteps - 1) render_seasonal_display(i, _time);
+			continue;
+		}
+
 		// draw hours
 		if(_time->tm_hour != old_h) {
 			int h = twentyfourh ? _time->tm_hour : (_time->tm_hour + 11) % 12 + 1;
@@ -643,15 +746,65 @@ int main(int argc, char** argv ) {
 			screen->h, &render_areas[0]);
 	}
 
+	for (int i = 0; i < clock_layout_count; i++) {
+		clock_areas[i] = render_areas[i];
+		clock_content[i] = GLUQLO_CONTENT_TIME;
+	}
+
+	if (fullscreen && !wid) {
+		for (int i = 0; i < clock_layout_count; i++) {
+			if (gluqlo_should_render_seasonal_on_monitor(render_areas,
+			    clock_layout_count, i)) {
+				clock_content[i] = GLUQLO_CONTENT_SEASONAL;
+			}
+		}
+	} else if (wid && have_embedded_position && monitor_count > 1) {
+		for (int i = 0; i < monitor_count; i++) {
+			if (embedded_x >= monitors[i].x &&
+			    embedded_x < monitors[i].x + monitors[i].w &&
+			    embedded_y >= monitors[i].y &&
+			    embedded_y < monitors[i].y + monitors[i].h &&
+			    gluqlo_should_render_seasonal_on_monitor(monitors,
+			    monitor_count, i)) {
+				clock_content[0] = GLUQLO_CONTENT_SEASONAL;
+				break;
+			}
+		}
+	}
+
 	int font_base = render_areas[0].w > render_areas[0].h ?
 		render_areas[0].h * display_scale_factor :
 		render_areas[0].w * display_scale_factor;
+	int season_current_font_size = font_base / 4;
+	int season_blur_font_size = font_base / 7;
+	int hou_current_font_size = font_base / 12;
+	int hou_blur_font_size = font_base / 16;
+	if (season_current_font_size < 18) season_current_font_size = 18;
+	if (season_blur_font_size < 12) season_blur_font_size = 12;
+	if (hou_current_font_size < 12) hou_current_font_size = 12;
+	if (hou_blur_font_size < 12) hou_blur_font_size = 12;
+	const char *seasonal_font_candidates[] = {
+		"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+		"/usr/share/fonts/todesk/NotoSansCJK-Regular.ttc",
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+		FONT
+	};
+	const char *seasonal_font_path = gluqlo_choose_existing_font(
+		seasonal_font_candidates,
+		sizeof(seasonal_font_candidates) / sizeof(seasonal_font_candidates[0]));
+	if (!seasonal_font_path) seasonal_font_path = FONT;
 
 	TTF_Init();
 	atexit(TTF_Quit);
 	font_time = TTF_OpenFont(FONT, font_base / 1.68 );
 	font_mode = TTF_OpenFont(FONT, font_base / 16.5);
-	if (!font_time || !font_mode) {
+	font_season_current = TTF_OpenFont(seasonal_font_path, season_current_font_size);
+	font_season_blur = TTF_OpenFont(seasonal_font_path, season_blur_font_size);
+	font_hou_current = TTF_OpenFont(seasonal_font_path, hou_current_font_size);
+	font_hou_blur = TTF_OpenFont(seasonal_font_path, hou_blur_font_size);
+	if (!font_time || !font_mode || !font_season_current ||
+	    !font_season_blur || !font_hou_current || !font_hou_blur) {
 		fprintf(stderr, "TTF_OpenFont: %s\n", TTF_GetError());
 		return 1;
 	}
@@ -741,6 +894,10 @@ int main(int argc, char** argv ) {
 
 	TTF_CloseFont(font_time);
 	TTF_CloseFont(font_mode);
+	TTF_CloseFont(font_season_current);
+	TTF_CloseFont(font_season_blur);
+	TTF_CloseFont(font_hou_current);
+	TTF_CloseFont(font_hou_blur);
 
 	return 0;
 }
